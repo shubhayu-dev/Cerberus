@@ -25,13 +25,13 @@ from starlette.middleware.sessions import SessionMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
-from auth_middleware import _decode_token, extract_roles
-from agent import detect_failure, generate_remediation_script
-from security import scrubber
-from vault import vault
-from zero_trust import filter_instance, SecurityViolationError
-from signing import sign_remediation_payload
-from stepup import (
+from app.auth_middleware import _decode_token, extract_roles
+from app.agent import detect_failure, generate_remediation_script
+from app.security import scrubber
+from app.vault import vault
+from app.zero_trust import filter_instance, SecurityViolationError
+from app.signing import sign_remediation_payload
+from app.stepup import (
     StepUpContext, check_required, verify_token_has_mfa,
     raise_stepup_required,
 )
@@ -127,6 +127,21 @@ async def login():
         "audience":      AUTH0_AUDIENCE,
         "scope":         "openid profile email",
         "connection":    "github",
+    })
+    return RedirectResponse(url=f"https://{AUTH0_DOMAIN}/authorize?{params}")
+
+@app.get("/login/mfa", tags=["Web"])
+async def login_mfa():
+    """Redirects to Auth0 explicitly demanding Step-Up MFA."""
+    from urllib.parse import urlencode
+    params = urlencode({
+        "response_type": "token",
+        "client_id":     AUTH0_CLIENT_ID,
+        "redirect_uri":  AUTH0_CALLBACK,
+        "audience":      AUTH0_AUDIENCE,
+        "scope":         "openid profile email",
+        # THIS is the magic string for the Auth0 backend
+        "acr_values":    "http://schemas.openid.net/pape/policies/2007/06/multi-factor"
     })
     return RedirectResponse(url=f"https://{AUTH0_DOMAIN}/authorize?{params}")
 
@@ -330,16 +345,20 @@ async def analyze_logs(request_body: LogAnalysisRequest, request: Request):
         stepup = check_required(stepup_ctx)
 
         if stepup.required:
-            # Check if this request already has MFA verification
+            # Verify if the current token payload actually contains the MFA claim
+            # (Usually found in token_payload.get("amr", []) containing "mfa")
             has_mfa = (
                 request_body.mfa_verified
                 and verify_token_has_mfa(token_payload, request_id)
             )
 
             if not has_mfa:
-                print(f"SECURITY AUDIT: 🚨 Step-up MFA required but not verified | "
-                      f"req={request_id} → returning 403 with auth_url")
-                raise_stepup_required(stepup)
+                print(f"SECURITY AUDIT: 🚨 Step-up MFA required but not verified | req={request_id} → triggering frontend redirect")
+                # THE FIX: Explicitly send the exact JSON the frontend JS is looking for
+                raise HTTPException(
+                    status_code=403,
+                    detail={"error": "mfa_required", "message": "Step-up authentication required for critical severity."}
+                )
             else:
                 print(f"SECURITY AUDIT: ✅ MFA step-up verified | req={request_id} → proceeding")
 
