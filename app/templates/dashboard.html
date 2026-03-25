@@ -254,6 +254,26 @@ const SCENARIOS = [
   buildScenarios();
   await loadUser();
   checkHealth();
+
+  // Auto-retry after MFA redirect completes
+  const mfaRetry = sessionStorage.getItem('mfa_retry');
+  if (mfaRetry === 'true') {
+    sessionStorage.removeItem('mfa_retry');
+    const saved = sessionStorage.getItem('mfa_pending');
+    if (saved) {
+      sessionStorage.removeItem('mfa_pending');
+      const req = JSON.parse(saved);
+      console.warn("SECURITY AUDIT: ✅ MFA complete — auto-retrying analysis...");
+
+      // Restore the form fields
+      document.getElementById('logText').value    = req.logText;
+      document.getElementById('serviceName').value = req.serviceName;
+      if (req.githubRepo) document.getElementById('githubRepo').value = req.githubRepo;
+
+      // Small delay so UI is ready, then retry with mfa_verified=true
+      setTimeout(() => runAnalysis(true), 800);
+    }
+  }
 })();
 
 async function loadUser() {
@@ -284,7 +304,19 @@ async function loadUser() {
          </div>`;
   } catch(e) { window.location.href = '/'; }
 }
+// ── MFA Modal Controls ─────────────────────────────────────────────────────
+function showMFAModal() { 
+  const modal = document.getElementById('mfaOverlay');
+  if (modal) {
+    modal.classList.remove('hidden'); 
+  } else {
+    console.error("MFA Overlay element not found in DOM");
+  }
+}
 
+function dismissMFA() {
+  document.getElementById('mfaOverlay').classList.add('hidden');
+}
 async function checkHealth() {
   try {
     const r = await fetch('/health');
@@ -338,38 +370,37 @@ async function runAnalysis() {
       environment: 'production', 
     };
 
-    // Progressive onboarding for GitHub
     if (githubRepo) body.github_repo = githubRepo;
 
     const resp = await fetch('/logs/analyze', {
       method: 'POST', 
       headers: { 'Content-Type': 'application/json' },
-      credentials: 'include', // Crucial: sends your FastAPI session cookie
+      credentials: 'include', 
       body: JSON.stringify(body),
     });
     
     const json = await resp.json();
 
-    // ── THE BACKEND-DRIVEN MFA CATCHER ──────────────────────────────────────
+    // ── MFA Step-up handler ───────────────────────────────────────────────
     if (resp.status === 403) {
-      // FastAPI wraps custom exceptions in a 'detail' object
-      const err = json.detail || json.error || json;
-      
-      if (err.error === 'mfa_required' || err.stepup_required) {
-        console.warn("SECURITY AUDIT: Critical action detected. Step-Up MFA required.");
-        
-        // Just show the modal. We don't need a custom URL anymore,
-        // because proceedMFA() will explicitly hit our new backend route.
-        showMFAModal();
-        
-        btn.disabled = false; btn.textContent = '▶ ANALYZE LOG'; 
+      // Backend returns: {"error": {"error": "mfa_required", "stepup_required": true}}
+      const errObj     = json.error || {};
+      const errCode    = typeof errObj === 'object' ? errObj.error : errObj;
+      const isMfaReq   = errCode === 'mfa_required' || errObj.stepup_required === true;
+
+      if (isMfaReq) {
+        console.warn("SECURITY AUDIT: 🚨 Step-Up MFA required — showing modal");
+        document.getElementById('mfaOverlay').classList.remove('hidden');
+        btn.disabled = false; btn.textContent = '▶ ANALYZE LOG';
         return;
       }
     }
 
     if (!resp.ok) {
+      // Use the inner message if available
+      const errorMsg = json.error?.message || json.detail || "Unknown Error";
       document.getElementById('resultBody').innerHTML = `
-        <div class="err-box">Error ${resp.status}: ${JSON.stringify(json.detail || json.error)}<br>
+        <div class="err-box">Error ${resp.status}: ${errorMsg}<br>
         ${resp.status === 401 ? '<a href="/login" style="color:var(--accent)">Re-login</a>' : ''}</div>`;
       btn.disabled = false; btn.textContent = '▶ ANALYZE LOG'; 
       return;
@@ -380,14 +411,14 @@ async function runAnalysis() {
     addAudit(json);
     renderResult(json);
 
-    // GitHub Consent Trigger
     if (githubRepo && json.failure_detected && !json.github_issue) {
       setTimeout(() => showGHModal(), 1200);
     }
 
   } catch(e) {
+    console.error("Analysis Script Error:", e);
     document.getElementById('resultBody').innerHTML =
-      `<div class="err-box">Network error: ${e.message}</div>`;
+      `<div class="err-box">Application Error: ${e.message}</div>`;
   }
   
   btn.disabled = false; btn.textContent = '▶ ANALYZE LOG';
@@ -396,13 +427,21 @@ async function runAnalysis() {
 
 // ── TRIGGER BACKEND MFA ROUTE ──────────────────────────────────────────────
 function proceedMFA() {
-  // 1. Hide the custom UI modal
   document.getElementById('mfaOverlay').classList.add('hidden');
-  
-  console.warn("SECURITY AUDIT: Triggering backend /login/mfa route...");
-  
-  // 2. Redirect the browser to the new FastAPI route
-  // FastAPI will automatically append the 'acr_values' and send the user to Auth0
+  console.warn("SECURITY AUDIT: 🔐 Triggering Auth0 step-up MFA redirect...");
+
+  // Save the pending request so we can auto-retry after MFA completes
+  if (pendingReq) {
+    sessionStorage.setItem('mfa_pending', JSON.stringify({
+      logText:     pendingReq.logText,
+      serviceName: pendingReq.serviceName,
+      githubRepo:  pendingReq.githubRepo,
+    }));
+    sessionStorage.setItem('mfa_retry', 'true');
+  }
+
+  // Redirect to /login/mfa — FastAPI sends to Auth0 with state=mfa_stepup
+  // After Auth0 login, callback stores mfa_verified=True in session
   window.location.href = '/login/mfa';
 }
 // ── GitHub Consent Modal ───────────────────────────────────────────────────

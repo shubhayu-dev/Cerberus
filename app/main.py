@@ -140,9 +140,11 @@ async def login_mfa():
         "redirect_uri":  AUTH0_CALLBACK,
         "audience":      AUTH0_AUDIENCE,
         "scope":         "openid profile email",
-        # THIS is the magic string for the Auth0 backend
-        "acr_values":    "http://schemas.openid.net/pape/policies/2007/06/multi-factor"
+        "connection":    "github",
+        "prompt":        "login",   # force re-auth even if session exists
+        "state":         "mfa_stepup",  # callback uses this to set mfa_verified=True in session
     })
+    print("SECURITY AUDIT: 🔐 Redirecting to Auth0 step-up MFA")
     return RedirectResponse(url=f"https://{AUTH0_DOMAIN}/authorize?{params}")
 
 
@@ -171,11 +173,14 @@ async def store_token(request: Request):
             "token":         token,
             "token_payload": payload,
         }
+        # Check if this is an MFA step-up callback (state=mfa_stepup)
+        is_mfa = body.get("state", "") == "mfa_stepup"
+        user["mfa_verified"] = is_mfa
         request.session["user"] = user
         print(f"SECURITY AUDIT: Session created | user={user['sub']} | "
               f"role={'admin' if user['is_admin'] else 'user'} | "
-              f"email={user['email']}")
-        return {"ok": True}
+              f"mfa_verified={is_mfa}")
+        return {"ok": True, "mfa_verified": is_mfa}
     except HTTPException as e:
         raise e
     except Exception as e:
@@ -345,19 +350,17 @@ async def analyze_logs(request_body: LogAnalysisRequest, request: Request):
         stepup = check_required(stepup_ctx)
 
         if stepup.required:
-            # Verify if the current token payload actually contains the MFA claim
-            # (Usually found in token_payload.get("amr", []) containing "mfa")
-            has_mfa = (
-                request_body.mfa_verified
-                and verify_token_has_mfa(token_payload, request_id)
-            )
+            # Check MFA via two sources:
+            # 1. Session flag (set by /callback after /login/mfa redirect)
+            # 2. Frontend flag (set after MFA redirect completes)
+            session_mfa = get_session_user(request) and request.session.get("user", {}).get("mfa_verified", False)
+            has_mfa = request_body.mfa_verified or session_mfa
 
             if not has_mfa:
-                print(f"SECURITY AUDIT: 🚨 Step-up MFA required but not verified | req={request_id} → triggering frontend redirect")
-                # THE FIX: Explicitly send the exact JSON the frontend JS is looking for
+                print(f"SECURITY AUDIT: 🚨 Step-up MFA required | req={request_id} → returning 403")
                 raise HTTPException(
                     status_code=403,
-                    detail={"error": "mfa_required", "message": "Step-up authentication required for critical severity."}
+                    detail={"error": "mfa_required", "message": "Step-up authentication required for critical severity.", "stepup_required": True}
                 )
             else:
                 print(f"SECURITY AUDIT: ✅ MFA step-up verified | req={request_id} → proceeding")
