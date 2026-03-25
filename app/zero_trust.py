@@ -274,7 +274,7 @@ class AntiHallucinationFilter:
             print(f"SECURITY AUDIT: ⚠ recursive flag detected — risk +10")
 
         # ── Step 4: Final decision ────────────────────────────────────────────
-        if result.risk_score >= 50:
+        if result.risk_score >= 80:
             result.passed = False
             print(f"SECURITY AUDIT: ⛔ BLOCKED — risk score {result.risk_score} >= threshold 50")
             raise SecurityViolationError(
