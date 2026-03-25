@@ -22,6 +22,7 @@ p{color:#4a6080;font-size:0.8rem;}
   const hash = window.location.hash.substring(1);
   const params = new URLSearchParams(hash);
   const token = params.get('access_token');
+  const state = params.get('state'); // ── ADD THIS: Extract the state ──
   const error = params.get('error');
 
   if (error) {
@@ -35,14 +36,21 @@ p{color:#4a6080;font-size:0.8rem;}
     return;
   }
 
-  // Send token to backend to store in session
+  // Send token AND state to backend to store in session
   const resp = await fetch('/auth/store-token', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({access_token: token})
+    body: JSON.stringify({
+      access_token: token,
+      state: state // ── ADD THIS: Tell the backend if this was an MFA step-up ──
+    })
   });
 
   if (resp.ok) {
+    // If we just finished an MFA flow, we can also set a flag here for the dashboard
+    if (state === 'mfa_stepup') {
+      console.log("MFA Step-up detected in callback");
+    }
     window.location.href = '/dashboard';
   } else {
     document.querySelector('p').textContent = 'Failed to store token. Try again.';

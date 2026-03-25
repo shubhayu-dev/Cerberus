@@ -390,6 +390,7 @@ async function runAnalysis() {
 
       if (isMfaReq) {
         console.warn("SECURITY AUDIT: 🚨 Step-Up MFA required — showing modal");
+        pendingReq = {logText, serviceName, githubRepo};
         document.getElementById('mfaOverlay').classList.remove('hidden');
         btn.disabled = false; btn.textContent = '▶ ANALYZE LOG';
         return;
@@ -430,18 +431,18 @@ function proceedMFA() {
   document.getElementById('mfaOverlay').classList.add('hidden');
   console.warn("SECURITY AUDIT: 🔐 Triggering Auth0 step-up MFA redirect...");
 
-  // Save the pending request so we can auto-retry after MFA completes
-  if (pendingReq) {
-    sessionStorage.setItem('mfa_pending', JSON.stringify({
-      logText:     pendingReq.logText,
-      serviceName: pendingReq.serviceName,
-      githubRepo:  pendingReq.githubRepo,
-    }));
-    sessionStorage.setItem('mfa_retry', 'true');
-  }
+  // If pendingReq is somehow null, try to scrape the UI one last time
+  const finalLog = pendingReq?.logText || document.getElementById('logText').value;
+  const finalSvc = pendingReq?.serviceName || document.getElementById('serviceName').value;
+  const finalRepo = pendingReq?.githubRepo || document.getElementById('githubRepo').value;
 
-  // Redirect to /login/mfa — FastAPI sends to Auth0 with state=mfa_stepup
-  // After Auth0 login, callback stores mfa_verified=True in session
+  sessionStorage.setItem('mfa_pending', JSON.stringify({
+    logText:     finalLog,
+    serviceName: finalSvc,
+    githubRepo:  finalRepo
+  }));
+  sessionStorage.setItem('mfa_retry', 'true');
+
   window.location.href = '/login/mfa';
 }
 // ── GitHub Consent Modal ───────────────────────────────────────────────────
