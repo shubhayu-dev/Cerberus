@@ -45,7 +45,7 @@ def _get_model():
             GEMINI_MODEL,
             generation_config=GenerationConfig(
                 temperature=0.2,
-                max_output_tokens=1024,
+                max_output_tokens=2048,
                 response_mime_type="application/json",
             ),
         )
@@ -91,12 +91,11 @@ def detect_failure(log_text: str) -> dict:
                 }
 
     # 2. If it's an unknown error (like a Python traceback), 
-    # flag it as a generic_error so it still triggers the AI analysis pipeline,
-    # but don't trap it in the mock response loop!
+    # flag it as unstructured so Vertex AI processes it.
     if any(kw in lower for kw in ERROR_KEYWORDS):
         return {
             "detected": True,
-            "category": "unstructured_traceback", # <-- This specific string is key
+            "category": "unstructured_traceback",
             "pattern":  "AI_ANALYSIS_REQUIRED",
             "evidence": "Raw application exception detected",
             "exit_code": _extract_exit_code(lower),
@@ -140,7 +139,7 @@ permission_level = "admin" (Senior Dev):
 ═══ MANDATORY OUTPUT SCHEMA ═══
 Return ONLY a raw, perfectly formatted JSON object. 
 DO NOT wrap it in ```json blocks. DO NOT use trailing commas. 
-Ensure all strings are properly escaped.
+CRITICAL: You MUST properly escape all double quotes (\\") and newlines (\\n) inside your string values. Never use literal newlines inside a JSON string.
 
 {
   "issue": "<concise title — what broke>",
@@ -206,15 +205,36 @@ async def generate_remediation_script(
             lambda: model.generate_content(prompt)
         )
 
-        result = json.loads(response.text.strip())
+        raw_text = response.text.strip()
+        result = None
+        
+        # ── ROBUST JSON EXTRACTION ──
+        try:
+            # First attempt: Clean off markdown if it exists
+            clean_text = raw_text
+            if clean_text.startswith("```"):
+                clean_text = re.sub(r"\s*```$", "", clean_text)
+            result = json.loads(clean_text)
+        except json.JSONDecodeError:
+            # Second attempt: Extract exactly from the first { to the last }
+            start_idx = raw_text.find('{')
+            end_idx = raw_text.rfind('}')
+            if start_idx != -1 and end_idx != -1:
+                extracted = raw_text[start_idx:end_idx+1]
+                result = json.loads(extracted)
+            else:
+                raise ValueError("Could not locate JSON object in AI response.")
 
-        # Hard enforce: never return executable commands to non-admin roles
+        # ── SECURITY ENFORCEMENT ──
         if permission_level != "admin":
             result["command"] = None
 
         log.info(f"Vertex AI success | model={GEMINI_MODEL} | confidence={result.get('confidence')}%")
         return result
 
+    except json.JSONDecodeError as e:
+        log.error(f"Error parsing JSON: {e} | Raw output: {raw_text[:200]}...")
+        return _api_error_fallback(f"AI returned malformed JSON data: {e}")
     except Exception as e:
         log.error(f"Vertex AI call failed: {e}")
         return _api_error_fallback(f"LLM Generation Failed: {str(e)}")
