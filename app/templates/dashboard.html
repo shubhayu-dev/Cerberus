@@ -543,8 +543,15 @@ function addAudit(json) {
       : filter?.passed ? ' · <span style="color:var(--green)">✓ OK</span>' : '';
     const sBadge   = e.signed_payload ? ' · <span style="color:var(--green)">✍</span>' : '';
     const mBadge   = e.audit_trail?.mfa_verified ? ' · <span style="color:var(--yellow)">🔐</span>' : '';
-    const gh       = e.github_issue
-      ? ` · <a href="${e.github_issue.url}" target="_blank" style="color:var(--green)">#${e.github_issue.number}</a>` : '';
+    const ghIssue  = e.github_issue;
+    const gh       = ghIssue
+      ? (() => {
+          const isComment = ghIssue.action === 'commented';
+          const col = isComment ? 'var(--yellow)' : 'var(--green)';
+          const lbl = isComment ? `💬 #${ghIssue.number}` : `↗ #${ghIssue.number}`;
+          return ` · <a href="${ghIssue.url}" target="_blank" style="color:${col}">${lbl}</a>`;
+        })()
+      : '';
     return `<div class="ai">
       <div class="dot" style="background:${color};flex-shrink:0;margin-top:3px"></div>
       <div class="ai-time">${time}</div>
@@ -614,8 +621,22 @@ function renderResult(json) {
       Signature: ${json.signed_payload.signature?.substring(0,48)}...
     </div>` : '';
 
-  const ghHtml = json.github_issue
-    ? `<a class="gh-badge" href="${json.github_issue.url}" target="_blank">↗ Issue #${json.github_issue.number} created via Token Vault</a>` : '';
+  const gh = json.github_issue;
+  const ghHtml = gh ? (() => {
+    const isComment = gh.action === 'commented';
+    const icon      = isComment ? '💬' : '↗';
+    const label     = isComment
+      ? `Issue #${gh.number} already open — comment added`
+      : `Issue #${gh.number} created via Token Vault`;
+    const color     = isComment ? 'var(--yellow)' : 'var(--green)';
+    const border    = isComment ? 'rgba(255,204,0,0.3)' : 'rgba(0,255,157,0.3)';
+    const bg        = isComment ? 'rgba(255,204,0,0.08)' : 'rgba(0,255,157,0.1)';
+    const url       = gh.comment_url || gh.url;
+    return `<a class="gh-badge" href="${url}" target="_blank"
+              style="color:${color};border-color:${border};background:${bg}">
+              ${icon} ${label}
+            </a>`;
+  })() : '';
 
   // Risk bar color: green < 30, yellow < 60, red >= 60
   const riskScore = d.risk_assessment || 0;

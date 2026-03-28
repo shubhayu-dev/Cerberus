@@ -37,6 +37,8 @@ from stepup import (
     raise_stepup_required,
 )
 
+from upstash_redis import Redis
+
 load_dotenv()
 logging.basicConfig(
     level=logging.INFO,
@@ -49,6 +51,15 @@ AUTH0_CLIENT_ID = os.getenv("AUTH0_CLIENT_ID")
 AUTH0_AUDIENCE  = os.getenv("AUTH0_AUDIENCE")
 AUTH0_CALLBACK  = os.getenv("AUTH0_CALLBACK_URL", "http://localhost:8000/callback")
 CLOUD_RUN_URL   = os.getenv("CLOUD_RUN_URL", "https://remediation-agent-gzuqcqtiqa-uc.a.run.app")
+
+try:
+    redis = Redis(
+        url=os.getenv("UPSTASH_REDIS_REST_URL"), 
+        token=os.getenv("UPSTASH_REDIS_REST_TOKEN")
+    )
+except Exception as e:
+    redis = None
+    print(f"SECURITY AUDIT: ⚠ Redis not initialized. Rate limiting disabled. {e}")
 
 TEMPLATES = Path(__file__).parent / "templates"
 
@@ -106,6 +117,25 @@ def get_actor(request: Request) -> dict:
 
     raise HTTPException(status_code=401, detail="Not authenticated")
 
+async def rate_limiter(request: Request):
+    if not redis:
+        return # Skip if Redis isn't configured
+        
+    actor = get_actor(request)
+    user_id = actor["sub"]
+    
+    key = f"rate_limit:{user_id}"
+    
+    current_count = redis.incr(key)
+    if current_count == 1:
+        redis.expire(key, 60)
+
+    if current_count > 3:  # Allow 3 requests per minute
+        print(f"SECURITY AUDIT: 🚨 Rate limit triggered for user {user_id}")
+        raise HTTPException(
+            status_code=429, 
+            detail="Security Rate Limit: Too many requests. Please wait 1 minute."
+        )
 
 # ── Web Routes ────────────────────────────────────────────────────────────────
 
@@ -274,7 +304,7 @@ class RemediationResponse(BaseModel):
 
 # ── Core Agent Endpoint ───────────────────────────────────────────────────────
 
-@app.post("/logs/analyze", response_model=RemediationResponse, tags=["Agent"])
+@app.post("/logs/analyze", response_model=RemediationResponse, tags=["Agent"], dependencies=[Depends(rate_limiter)])
 async def analyze_logs(request_body: LogAnalysisRequest, request: Request):
     """
     Zero-trust remediation pipeline:
