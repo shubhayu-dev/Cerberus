@@ -36,6 +36,9 @@ p{color:#4a6080;font-size:0.8rem;}
     return;
   }
 
+  // Persist access token for API calls from frontend and session storage
+  localStorage.setItem('access_token', token);
+
   // Send token AND state to backend to store in session
   const resp = await fetch('/auth/store-token', {
     method: 'POST',

@@ -18,14 +18,15 @@ from datetime import datetime, timezone
 from typing import Optional
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, HTMLResponse, RedirectResponse
 from starlette.middleware.sessions import SessionMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
+import httpx
 
-from auth_middleware import _decode_token, extract_roles
+from auth_middleware import _decode_token, extract_roles, require_auth
 from agent import detect_failure, generate_remediation_script
 from security import scrubber
 from vault import vault
@@ -249,6 +250,12 @@ class LogAnalysisRequest(BaseModel):
     mfa_verified:      bool          = False  # frontend sets True after step-up
 
 
+class IssueRequest(BaseModel):
+    repo:  str
+    title: str
+    body:  str
+
+
 class RemediationResponse(BaseModel):
     timestamp:         str
     request_id:        str
@@ -468,6 +475,43 @@ async def analyze_logs(request_body: LogAnalysisRequest, request: Request):
         github_issue=github_issue,
         audit_trail=audit,
     )
+
+
+@app.post('/api/create-issue', tags=['GitHub'])
+async def create_github_issue(request_body: IssueRequest, actor=Depends(require_auth)):
+    """Creates a GitHub issue via Auth0 vaulted GitHub token (admin-only)."""
+
+    if 'admin' not in actor.get('roles', []):
+        raise HTTPException(status_code=403, detail='Only Admins can auto-generate GitHub issues.')
+
+    github_token = await vault.get_github_token(actor['sub'])
+    if not github_token:
+        github_token = os.getenv('GITHUB_DEMO_TOKEN')
+        if github_token:
+            print('SECURITY AUDIT: Using fallback GITHUB_DEMO_TOKEN for GitHub issue creation')
+
+    if not github_token:
+        raise HTTPException(status_code=500, detail='Could not retrieve GitHub token from Auth0 Vault or environment variable.')
+
+    github_url = f'https://api.github.com/repos/{request_body.repo}/issues'
+    headers = {
+        'Authorization': f'token {github_token}',
+        'Accept': 'application/vnd.github.v3+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+    }
+    payload = { 'title': request_body.title, 'body': request_body.body }
+
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            response = await client.post(github_url, json=payload, headers=headers)
+            if response.status_code == 201:
+                data = response.json()
+                return { 'status': 'success', 'issue_url': data['html_url'], 'issue_number': data.get('number') }
+            raise HTTPException(status_code=response.status_code, detail=response.text)
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ── GitHub Progressive Onboarding ─────────────────────────────────────────────

@@ -249,8 +249,52 @@ const S = { req:0, fail:0, conf:[], blocked:0 };
 let auditEvents    = [];
 let userInfo       = {};
 let pendingReq     = null;
+let lastAnalysis   = null;
 let mfaAuthUrl     = null;
 let mfaVerified    = false;
+
+async function createRealGitHubIssue(repoPath, analysisData) {
+  if (!repoPath) {
+    alert('Please provide a GitHub repo in the input before creating an issue.');
+    return;
+  }
+  if (!analysisData) {
+    alert('No analysis data available. Run analysis first.');
+    return;
+  }
+
+  try {
+    const accessToken = localStorage.getItem('access_token');
+    const response = await fetch('/api/create-issue', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(accessToken ? { 'Authorization': `Bearer ${accessToken}` } : {}),
+      },
+      body: JSON.stringify({
+        repo: repoPath,
+        title: `🚨 CRITICAL: ${analysisData.service_name} Failure Detected`,
+      body: `### Auto-Generated Root Cause Analysis\n\n**Confidence:** ${analysisData.remediation?.confidence || 0}%\n\n**Diagnosis:**\n${analysisData.remediation?.root_cause || 'N/A'}\n\n**Proposed Remediation:**\n\n\`\`\`bash\n${analysisData.remediation?.command || 'No command generated'}\n\`\`\`\n`,
+      }),
+    });
+
+    if (response.ok) {
+      const data = await response.json();
+      alert(`✅ Success! Issue created at: ${data.issue_url}`);
+      window.open(data.issue_url, '_blank');
+      return data;
+    } else {
+      const error = await response.json();
+      alert(`❌ Failed to create issue: ${error.detail || JSON.stringify(error)}`);
+      console.error('GH issue error', error);
+      return null;
+    }
+  } catch (err) {
+    console.error('Error creating issue:', err);
+    alert('❌ Network error while creating issue. See console for details.');
+    return null;
+  }
+}
 
 const SCENARIOS = [
   { id:"nginx", name:"Nginx Port Conflict",  service:"nginx",      severity:"high",
@@ -371,6 +415,8 @@ async function runAnalysis() {
     });
     
     const json = await resp.json();
+    lastAnalysis = json;
+    pendingReq = { logText, serviceName, githubRepo };
 
     // ── FIXED NESTED MFA CATCHER ──────────────────────────────────────────
     if (resp.status === 403) {
@@ -439,30 +485,29 @@ function showGHModal() { document.getElementById('ghOverlay').classList.remove('
 
 async function proceedGitHub() {
   document.getElementById('ghOverlay').classList.add('hidden');
-  try {
-    const r = await fetch('/auth/github-consent-url', { credentials:'include' });
-    const d = await r.json();
-    const ok = confirm(
-      'In production: redirects to Auth0 → GitHub OAuth consent (scope: public_repo only).\n\n' +
-      'For demo: click OK to simulate consent and create the GitHub issue.'
-    );
-    if (ok && pendingReq) {
-      const btn = document.getElementById('analyzeBtn');
-      btn.disabled = true; btn.textContent = '⏳ Creating issue...';
-      const body = {
-        log_text: pendingReq.logText, service_name: pendingReq.serviceName,
-        environment: 'production', github_repo: pendingReq.githubRepo,
-        mfa_verified: mfaVerified,
-      };
-      const resp = await fetch('/logs/analyze', {
-        method:'POST', headers:{'Content-Type':'application/json'},
-        credentials:'include', body:JSON.stringify(body),
-      });
-      const json = await resp.json();
-      if (resp.ok) { updateMetrics(json); addAudit(json); renderResult(json); }
-      btn.disabled = false; btn.textContent = '▶ ANALYZE LOG';
-    }
-  } catch(e) { console.error(e); }
+
+  if (!lastAnalysis) {
+    alert('No analysis result found. Please run the log analysis first.');
+    return;
+  }
+
+  const githubRepo = document.getElementById('githubRepo').value.trim();
+  if (!githubRepo) {
+    alert('Please set the GitHub repo in the input (owner/repo).');
+    return;
+  }
+
+  const btn = document.getElementById('analyzeBtn');
+  btn.disabled = true; btn.textContent = '⏳ Creating GitHub issue...';
+
+  const issue = await createRealGitHubIssue(githubRepo, lastAnalysis);
+  if (issue) {
+    // Update UI with issue link and audit event
+    lastAnalysis.github_issue = { url: issue.issue_url, number: 'n/a' };
+    renderResult(lastAnalysis);
+  }
+
+  btn.disabled = false; btn.textContent = '▶ ANALYZE LOG';
 }
 
 function dismissGitHub() { document.getElementById('ghOverlay').classList.add('hidden'); }
