@@ -283,9 +283,36 @@ async def generate_remediation_script(
         if result is None:
             return _api_error_fallback(f"Both extraction and formatter failed. Raw: {raw_text[:200]}")
 
-        # ── SECURITY ENFORCEMENT (always, regardless of path taken) ─────────
+        # ── SECURITY ENFORCEMENT & SCHEMA VALIDATION ─────────
+        
+        # 1. Kill 'undefined' frontend bugs by setting safe fallbacks for missing keys
+        default_schema = {
+            "issue": "Unknown Issue", "service": "unknown", "root_cause": "Unknown",
+            "reasoning": "AI did not provide reasoning.", "confidence": 0,
+            "severity": "medium", "requires_mfa": False, "security_verdict": "Unknown",
+            "blast_radius": "Unknown", "risk_assessment": 50, "command": None,
+            "safe_alternatives": ["df -h", "ps aux", "journalctl -xe | tail -50"],
+            "suggested_fix": "Review logs manually.", "rollback": "N/A", "estimated_downtime": "Unknown"
+        }
+        
+        # Merge AI result with defaults (AI values overwrite defaults)
+        for key, default_val in default_schema.items():
+            if key not in result or result.get(key) is None:
+                result[key] = default_val
+
+        # 2. Hard enforce: never return executable commands to non-admin roles
         if permission_level != "admin":
             result["command"] = None
+
+        # 3. Hard enforce MFA Logic: NEVER trust the AI to do this correctly
+        is_critical = str(result.get("severity", "")).lower() == "critical"
+        has_command = bool(result.get("command"))
+        
+        # Only trigger MFA if it's an admin, it's actually critical, AND there's a command to run
+        if is_critical and permission_level == "admin" and has_command:
+            result["requires_mfa"] = True
+        else:
+            result["requires_mfa"] = False
 
         log.info(f"Vertex AI success | model={GEMINI_MODEL} | confidence={result.get('confidence')}%")
         return result
@@ -293,7 +320,6 @@ async def generate_remediation_script(
     except Exception as e:
         log.error(f"Vertex AI call failed: {e}")
         return _api_error_fallback(f"LLM Generation Failed: {str(e)}")
-
 
 def _extract_json(raw_text: str) -> dict | None:
     """
