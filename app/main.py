@@ -395,45 +395,57 @@ async def analyze_logs(request_body: LogAnalysisRequest, request: Request):
           f"severity={severity} | confidence={remediation.get('confidence')}% | "
           f"risk_assessment={remediation.get('risk_assessment')}")
 
-    # ── Step 5: Permission-based command execution logic ──────────────────────
+    # ── Step 5: Permission-based command execution logic (based on risk_assessment) ──────────────────────
     signed_payload_dict = None
     security_audit      = {}
 
-    # Determine if command should be executed based on role and severity
+    # Get risk_assessment from remediation (0-100)
+    risk_score = remediation.get("risk_assessment", 50)
+    
+    # Determine if command should be executed based on role and risk_assessment
     can_execute_command = False
     
     if permission_level == "admin":
-        # Admins can execute high-risk and high severity
-        # Critical severity requires MFA
-        can_execute_command = remediation.get("command") and severity in ["high", "medium", "low"]
-        
-        if remediation.get("command") and severity == "critical":
-            # Critical requires MFA for admins
-            stepup_ctx = StepUpContext(
-                severity=severity,
-                failure_category=failure["category"],
-                permission_level=permission_level,
-                request_id=request_id,
-            )
-            stepup = check_required(stepup_ctx)
+        # ADMIN: execute if risk < 80, require MFA if >= 80
+        if remediation.get("command"):
+            if risk_score < 80:
+                # Low-risk: execute immediately
+                can_execute_command = True
+                print(f"SECURITY AUDIT: Admin executing low-risk command | req={request_id} | risk={risk_score}")
+            else:
+                # High-risk (>= 80): require MFA
+                stepup_ctx = StepUpContext(
+                    risk_assessment=risk_score,
+                    failure_category=failure["category"],
+                    permission_level=permission_level,
+                    request_id=request_id,
+                )
+                stepup = check_required(stepup_ctx)
 
-            if stepup.required:
-                session_mfa = get_session_user(request) and request.session.get("user", {}).get("mfa_verified", False)
-                has_mfa = request_body.mfa_verified or session_mfa
+                if stepup.required:
+                    session_mfa = get_session_user(request) and request.session.get("user", {}).get("mfa_verified", False)
+                    has_mfa = request_body.mfa_verified or session_mfa
 
-                if not has_mfa:
-                    print(f"SECURITY AUDIT: 🚨 Step-up MFA required | req={request_id} → returning 403")
-                    raise HTTPException(
-                        status_code=403,
-                        detail={"error": "mfa_required", "message": "Step-up authentication required for critical severity.", "stepup_required": True}
-                    )
-                else:
-                    print(f"SECURITY AUDIT: ✅ MFA step-up verified | req={request_id} → admin can execute critical command")
-                    can_execute_command = True
+                    if not has_mfa:
+                        print(f"SECURITY AUDIT: 🚨 Step-up MFA required | req={request_id} | risk={risk_score} → returning 403")
+                        raise HTTPException(
+                            status_code=403,
+                            detail={"error": "mfa_required", "message": f"Step-up authentication required for high-risk command (risk={risk_score}).", "stepup_required": True}
+                        )
+                    else:
+                        print(f"SECURITY AUDIT: ✅ MFA step-up verified | req={request_id} | risk={risk_score} → admin can execute")
+                        can_execute_command = True
     
     elif permission_level == "user":
-        # Users can execute only high-risk/high severity commands (not critical)
-        can_execute_command = remediation.get("command") and severity != "critical"
+        # USER: execute if risk < 50, deny if >= 50, NO MFA ever
+        if remediation.get("command"):
+            if risk_score < 50:
+                can_execute_command = True
+                print(f"SECURITY AUDIT: User executing low-risk command | req={request_id} | risk={risk_score}")
+            else:
+                # High risk for user: deny execution, no MFA
+                remediation["command"] = None
+                print(f"SECURITY AUDIT: User denied high-risk command | req={request_id} | risk={risk_score} >= 50")
 
     # ── Step 6: AntiHallucinationFilter & RSA-PSS Signing ──────────────────
     if can_execute_command:

@@ -33,8 +33,9 @@ AUTH0_CLIENT_ID = os.getenv("AUTH0_CLIENT_ID")
 AUTH0_AUDIENCE  = os.getenv("AUTH0_AUDIENCE")
 AUTH0_CALLBACK  = os.getenv("AUTH0_CALLBACK_URL", "http://localhost:8000/callback")
 
-# Severity levels that trigger step-up MFA
-CRITICAL_SEVERITIES = {"critical"}
+# Risk assessment threshold for step-up MFA
+# Only admins with risk >= 80 need MFA
+MFA_RISK_THRESHOLD = 80
 
 
 # ── Models ────────────────────────────────────────────────────────────────────
@@ -48,7 +49,7 @@ class StepUpRequirement(BaseModel):
 
 
 class StepUpContext(BaseModel):
-    severity:         str
+    risk_assessment:  int  # 0-100 score
     failure_category: str
     permission_level: str
     request_id:       str
@@ -61,32 +62,34 @@ def check_required(context: StepUpContext) -> StepUpRequirement:
     Evaluates whether the current request requires MFA step-up.
 
     Rules:
-    - Admin + critical severity → always requires MFA
-    - User role → never requires MFA (they don't get commands anyway)
+    - Admin + risk_assessment >= 80 → requires MFA
+    - User role → NEVER requires MFA
     """
+    # Users never get MFA
     if context.permission_level != "admin":
         print(f"SECURITY AUDIT: Step-up check | req={context.request_id} | "
-              f"role=user → no step-up required (non-admin)")
-        return StepUpRequirement(required=False, reason="non_admin_role")
+              f"role=user → no step-up required (users never need MFA)")
+        return StepUpRequirement(required=False, reason="user_role_no_mfa")
 
-    needs_stepup = context.severity in CRITICAL_SEVERITIES
+    # Check risk assessment threshold
+    needs_stepup = context.risk_assessment >= MFA_RISK_THRESHOLD
 
     if not needs_stepup:
         print(f"SECURITY AUDIT: Step-up check | req={context.request_id} | "
-              f"severity={context.severity} | category={context.failure_category} → "
-              f"no step-up required")
-        return StepUpRequirement(required=False, reason="below_threshold")
+              f"risk_assessment={context.risk_assessment} | category={context.failure_category} → "
+              f"below MFA threshold ({MFA_RISK_THRESHOLD})")
+        return StepUpRequirement(required=False, reason="below_risk_threshold")
 
     # Build Auth0 MFA prompt URL
     auth_url = _build_mfa_auth_url(request_id=context.request_id)
 
     reason = (
-        f"Critical severity incident ({context.severity}) requires MFA verification "
+        f"High-risk incident (risk_assessment={context.risk_assessment}) requires MFA verification "
         f"before executable commands can be issued. Category: {context.failure_category}"
     )
 
     print(f"SECURITY AUDIT: 🔐 STEP-UP MFA REQUIRED | req={context.request_id} | "
-          f"severity={context.severity} | category={context.failure_category} | "
+          f"risk_assessment={context.risk_assessment} | category={context.failure_category} | "
           f"actor_level=admin | reason={reason}")
 
     return StepUpRequirement(
