@@ -107,32 +107,15 @@ def get_actor(request: Request) -> dict:
         payload = _decode_token(token)
         roles   = extract_roles(payload)
         return {
-            "sub":           payload.get("sub"),
-            "email":         payload.get("email", "unknown"),
-            "name":          payload.get("name", "unknown"),
-            "roles":         roles,
-            "is_admin":      "admin" in roles,
+            "sub":          payload.get("sub"),
+            "email":        payload.get("email", "unknown"),
+            "name":         payload.get("name", "unknown"),
+            "roles":        roles,
+            "is_admin":     "admin" in roles,
             "token_payload": payload,
         }
 
     raise HTTPException(status_code=401, detail="Not authenticated")
-
-
-def normalize_severity(severity: str) -> str:
-    sev = (severity or "").strip().lower()
-    if sev not in {"critical", "high", "medium", "low"}:
-        return "medium"
-    return sev
-
-
-def adjust_severity_by_risk(severity: str, risk_assessment: int) -> str:
-    if severity == "critical" and risk_assessment < 70:
-        return "high"
-    if severity == "high" and risk_assessment < 40:
-        return "medium"
-    if severity == "medium" and risk_assessment < 20:
-        return "low"
-    return severity
 
 async def rate_limiter(request: Request):
     if not redis:
@@ -385,25 +368,32 @@ async def analyze_logs(request_body: LogAnalysisRequest, request: Request):
         failure=failure,
     )
 
-    raw_severity = remediation.get("severity", "medium")
-    raw_risk     = remediation.get("risk_assessment", 50)
+    # Normalize and derive severity from risk_assessment to avoid false-critical labeling
+    risk_score = remediation.get("risk_assessment")
+    if isinstance(risk_score, (int, float)):
+        risk_score = int(risk_score)
+        remediation["risk_assessment"] = max(0, min(100, risk_score))
+        if risk_score < 30:
+            remediation["severity"] = "low"
+        elif risk_score < 60:
+            remediation["severity"] = "medium"
+        elif risk_score < 80:
+            remediation["severity"] = "high"
+        else:
+            remediation["severity"] = "critical"
 
-    try:
-        risk_assessment = int(raw_risk)
-    except (TypeError, ValueError):
-        risk_assessment = 50
+    # Ensure severity is canonical
+    severity = str(remediation.get("severity", "medium")).lower()
+    if severity not in ["low", "medium", "high", "critical"]:
+        severity = "medium"
+    remediation["severity"] = severity
 
-    severity = normalize_severity(raw_severity)
-    adjusted_severity = adjust_severity_by_risk(severity, risk_assessment)
-
-    if adjusted_severity != severity:
-        print(f"SECURITY AUDIT: Severity adjusted by risk assessment | req={request_id} | "
-              f"original={severity} | risk={risk_assessment} -> adjusted={adjusted_severity}")
-
-    severity = adjusted_severity
+    # Track MFA requirement deterministically; do not rely solely on AI output
+    remediation["requires_mfa"] = (severity == "critical")
 
     print(f"SECURITY AUDIT: AI diagnosis complete | req={request_id} | "
-          f"severity={severity} | risk_assessment={risk_assessment} | confidence={remediation.get('confidence')}%")
+          f"severity={severity} | confidence={remediation.get('confidence')}% | "
+          f"risk_assessment={remediation.get('risk_assessment')}")
 
     # ── Step 5: Permission-based command execution logic ──────────────────────
     signed_payload_dict = None
@@ -413,10 +403,12 @@ async def analyze_logs(request_body: LogAnalysisRequest, request: Request):
     can_execute_command = False
     
     if permission_level == "admin":
-        # Admins can execute high/medium/low severity commands directly
+        # Admins can execute high-risk and high severity
+        # Critical severity requires MFA
         can_execute_command = remediation.get("command") and severity in ["high", "medium", "low"]
-
+        
         if remediation.get("command") and severity == "critical":
+            # Critical requires MFA for admins
             stepup_ctx = StepUpContext(
                 severity=severity,
                 failure_category=failure["category"],
@@ -426,20 +418,21 @@ async def analyze_logs(request_body: LogAnalysisRequest, request: Request):
             stepup = check_required(stepup_ctx)
 
             if stepup.required:
-                session_user = get_session_user(request) or {}
-                session_mfa = session_user.get("mfa_verified", False)
-                token_mfa = verify_token_has_mfa(token_payload, request_id)
-                has_mfa = request_body.mfa_verified or session_mfa or token_mfa
+                session_mfa = get_session_user(request) and request.session.get("user", {}).get("mfa_verified", False)
+                has_mfa = request_body.mfa_verified or session_mfa
 
                 if not has_mfa:
-                    print(f"SECURITY AUDIT: 🚨 Step-up MFA required | req={request_id} → raising 403 with stepup flow")
-                    raise_stepup_required(stepup)
-
-                print(f"SECURITY AUDIT: ✅ MFA step-up verified | req={request_id} → admin can execute critical command")
-                can_execute_command = True
-
+                    print(f"SECURITY AUDIT: 🚨 Step-up MFA required | req={request_id} → returning 403")
+                    raise HTTPException(
+                        status_code=403,
+                        detail={"error": "mfa_required", "message": "Step-up authentication required for critical severity.", "stepup_required": True}
+                    )
+                else:
+                    print(f"SECURITY AUDIT: ✅ MFA step-up verified | req={request_id} → admin can execute critical command")
+                    can_execute_command = True
+    
     elif permission_level == "user":
-        # Users can execute only high/medium/low severity commands; critical is read-only diagnostics
+        # Users can execute only high-risk/high severity commands (not critical)
         can_execute_command = remediation.get("command") and severity != "critical"
 
     # ── Step 6: AntiHallucinationFilter & RSA-PSS Signing ──────────────────

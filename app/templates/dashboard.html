@@ -456,6 +456,11 @@ async function runAnalysis() {
     addAudit(json);
     renderResult(json);
 
+    if (json.remediation?.requires_mfa && userInfo?.is_admin && !json.remediation?.command && !json.audit_trail?.mfa_verified) {
+      console.warn('SECURITY AUDIT: MFA-required response, forcing MFA modal.');
+      showMFAModal();
+    }
+
     if (githubRepo && json.failure_detected && !json.github_issue) {
       setTimeout(() => showGHModal(), 1200);
     }
@@ -587,7 +592,13 @@ function renderResult(json) {
   document.getElementById('permBadge').innerHTML =
     `<span style="color:${pColor};font-weight:700">${isAdmin?'🔑 ADMIN — COMMANDS ENABLED':'👤 USER — EXPLANATION ONLY'}</span>`;
 
-  const sevClass = d.severity === 'critical' ? 'chip-crit' : 'chip-high';
+  const sevClass = d.severity === 'critical'
+      ? 'chip-crit'
+      : d.severity === 'high'
+        ? 'chip-high'
+        : d.severity === 'medium'
+          ? 'chip-yellow'
+          : 'chip-green';
   const pClass   = isAdmin ? 'chip-admin' : 'chip-user';
   const fa       = json.security_audit?.filter || {};
 
@@ -697,6 +708,11 @@ function renderResult(json) {
       <div class="sl" style="margin-top:12px">⏪ Rollback</div>
       <div class="rollback">${d.rollback}</div>
     </div>`;
+
+  if (isAdmin && d.requires_mfa && !d.command && !json.audit_trail?.mfa_verified) {
+    console.warn('SECURITY AUDIT: MFA-required state with hidden command; showing MFA modal.');
+    showMFAModal();
+  }
 }
 </script>
 </body>
