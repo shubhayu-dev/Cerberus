@@ -388,8 +388,8 @@ async def analyze_logs(request_body: LogAnalysisRequest, request: Request):
         severity = "medium"
     remediation["severity"] = severity
 
-    # Track MFA requirement deterministically; do not rely solely on AI output
-    remediation["requires_mfa"] = (severity == "critical")
+    # Note: MFA requirement is now determined by risk_assessment in Step 5,
+    # NOT by severity. The old line here has been removed in favor of risk-based logic.
 
     print(f"SECURITY AUDIT: AI diagnosis complete | req={request_id} | "
           f"severity={severity} | confidence={remediation.get('confidence')}% | "
