@@ -324,20 +324,45 @@ def _extract_json(raw_text: str) -> dict | None:
         except json.JSONDecodeError:
             pass
 
-    # Strategy 3: Fix common Gemini quirks before giving up
+    # Strategy 3: Fix common Gemini quirks
     # - Trailing commas before } or ]
-    # - Unescaped newlines inside strings (replace literal newlines in values with \n)
+    # - Unescaped newlines inside strings
     if start != -1 and end != -1:
         candidate = raw_text[start:end + 1]
-        # Remove trailing commas
         import re as _re
-        candidate = _re.sub(r',\s*([}\]])', r'', candidate)
+        # Remove trailing commas
+        candidate = _re.sub(r',\s*([}\]])', r'\1', candidate)
         try:
             return json.loads(candidate)
         except json.JSONDecodeError:
             pass
 
-    log.warning(f"_extract_json: all strategies failed | raw_start={raw_text[:80]}")
+    # Strategy 4: Handle TRUNCATED JSON (has { but missing closing })
+    # This happens when API response is cut off mid-transmission
+    if start != -1 and (end == -1 or end < start):
+        # JSON started but wasn't closed properly
+        candidate = raw_text[start:]
+        
+        # Count braces to see how many we need to close
+        open_braces = candidate.count('{') - candidate.count('}')
+        close_brackets = candidate.count('[') - candidate.count(']')
+        
+        # Try to complete the JSON by adding missing braces
+        repairs = [
+            candidate + '}' * open_braces + ']' * close_brackets,  # Add missing closes
+            candidate + '"}' * max(1, open_braces),  # Close any open string + braces
+            candidate.rstrip(',') + '}' * max(1, open_braces),  # Remove trailing comma + close
+        ]
+        
+        for repaired in repairs:
+            try:
+                result = json.loads(repaired)
+                log.info(f"_extract_json: recovered truncated JSON | added_closes={open_braces}")
+                return result
+            except json.JSONDecodeError:
+                continue
+
+    log.warning(f"_extract_json: all strategies failed | raw_start={raw_text[:80]} | has_open_brace={start != -1}")
     return None
 
 
