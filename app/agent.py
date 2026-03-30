@@ -41,12 +41,42 @@ def _get_model():
         from vertexai.generative_models import GenerativeModel, GenerationConfig
 
         vertexai.init(project=GCP_PROJECT_ID, location=GCP_LOCATION)
+        
+        # ── THE MAGIC BULLET: STRICT SCHEMA ENFORCEMENT ──
+        remediation_schema = {
+            "type": "OBJECT",
+            "properties": {
+                "issue": {"type": "STRING"},
+                "service": {"type": "STRING"},
+                "root_cause": {"type": "STRING"},
+                "reasoning": {"type": "STRING"},
+                "confidence": {"type": "INTEGER"},
+                "severity": {"type": "STRING"},
+                "requires_mfa": {"type": "BOOLEAN"},
+                "security_verdict": {"type": "STRING"},
+                "blast_radius": {"type": "STRING"},
+                "risk_assessment": {"type": "INTEGER"},
+                "command": {"type": "STRING", "nullable": True},
+                "safe_alternatives": {"type": "ARRAY", "items": {"type": "STRING"}},
+                "suggested_fix": {"type": "STRING"},
+                "rollback": {"type": "STRING"},
+                "estimated_downtime": {"type": "STRING"}
+            },
+            "required": [
+                "issue", "service", "root_cause", "reasoning", "confidence", 
+                "severity", "requires_mfa", "security_verdict", "blast_radius", 
+                "risk_assessment", "command", "safe_alternatives", 
+                "suggested_fix", "rollback", "estimated_downtime"
+            ]
+        }
+
         _vertex_model = GenerativeModel(
             GEMINI_MODEL,
             generation_config=GenerationConfig(
                 temperature=0.2,
                 max_output_tokens=2048,
                 response_mime_type="application/json",
+                response_schema=remediation_schema, # <-- Forces perfect output
             ),
         )
         log.info(f"Vertex AI ready | project={GCP_PROJECT_ID} | model={GEMINI_MODEL}")
@@ -302,14 +332,12 @@ async def generate_remediation_script(
         if permission_level != "admin":
             result["command"] = None
 
-        # 3. Hard enforce MFA Logic: based on risk_assessment (≥80 for admin indicates MFA needed)
-        # Note: Actual MFA requirement is NOW determined by main.py's stepup.check_required(),
-        # not by this field. This is kept for backward compatibility and logging only.
-        risk_score = result.get("risk_assessment", 50)
+        # 3. Hard enforce MFA Logic: NEVER trust the AI to do this correctly
+        is_critical = str(result.get("severity", "")).lower() == "critical"
         has_command = bool(result.get("command"))
         
-        # Set requires_mfa flag for reference (main.py uses stepup.check_required() instead)
-        if permission_level == "admin" and risk_score >= 80 and has_command:
+        # Only trigger MFA if it's an admin, it's actually critical, AND there's a command to run
+        if is_critical and permission_level == "admin" and has_command:
             result["requires_mfa"] = True
         else:
             result["requires_mfa"] = False
@@ -450,12 +478,6 @@ async def _format_with_agent(raw_text: str, permission_level: str) -> dict | Non
     """
     Two-agent pattern: when the primary Gemini call returns malformed output,
     this function calls Gemini again with a minimal formatter prompt.
-
-    The formatter model has one job: take the raw text and return valid JSON.
-    It uses a lower temperature (0.0) to be deterministic.
-
-    This is cheaper than a full retry because the formatter prompt is tiny
-    and the output is short structured JSON only.
     """
     if not GCP_PROJECT_ID:
         return None
@@ -465,40 +487,47 @@ async def _format_with_agent(raw_text: str, permission_level: str) -> dict | Non
         from vertexai.generative_models import GenerativeModel, GenerationConfig
 
         vertexai.init(project=GCP_PROJECT_ID, location=GCP_LOCATION)
+        
+        # Same strict schema for the formatter
+        formatter_schema = {
+            "type": "OBJECT",
+            "properties": {
+                "issue": {"type": "STRING"}, "service": {"type": "STRING"},
+                "root_cause": {"type": "STRING"}, "reasoning": {"type": "STRING"},
+                "confidence": {"type": "INTEGER"}, "severity": {"type": "STRING"},
+                "requires_mfa": {"type": "BOOLEAN"}, "security_verdict": {"type": "STRING"},
+                "blast_radius": {"type": "STRING"}, "risk_assessment": {"type": "INTEGER"},
+                "command": {"type": "STRING", "nullable": True},
+                "safe_alternatives": {"type": "ARRAY", "items": {"type": "STRING"}},
+                "suggested_fix": {"type": "STRING"}, "rollback": {"type": "STRING"},
+                "estimated_downtime": {"type": "STRING"}
+            },
+            "required": ["issue", "service", "root_cause", "reasoning", "confidence", "severity", "requires_mfa", "security_verdict", "blast_radius", "risk_assessment", "command", "safe_alternatives", "suggested_fix", "rollback", "estimated_downtime"]
+        }
 
         formatter = GenerativeModel(
             GEMINI_MODEL,
             generation_config=GenerationConfig(
-                temperature=0.0,          # deterministic — just format, don't invent
+                temperature=0.0,
                 max_output_tokens=1024,
                 response_mime_type="application/json",
+                response_schema=formatter_schema, # <-- Prevents formatter laziness
             ),
         )
 
-        formatter_input = f"""{FORMATTER_PROMPT}
-
-UNSTRUCTURED DIAGNOSTIC TEXT TO FORMAT:
----
-{raw_text[:3000]}
----
-
-Return ONLY the JSON object."""
+        formatter_input = f"""{FORMATTER_PROMPT}\n\nUNSTRUCTURED DIAGNOSTIC TEXT TO FORMAT:\n---\n{raw_text[:3000]}\n---\n\nReturn ONLY the JSON object."""
 
         log.info("Formatter agent running — attempting to rescue malformed output")
-        print(f"AGENT: 🔧 Formatter agent invoked | input_length={len(raw_text)} chars")
-
-        loop   = asyncio.get_event_loop()
-        resp   = await loop.run_in_executor(None, lambda: formatter.generate_content(formatter_input))
+        
+        loop = asyncio.get_event_loop()
+        resp = await loop.run_in_executor(None, lambda: formatter.generate_content(formatter_input))
         result = _extract_json(resp.text.strip())
 
         if result:
-            print(f"AGENT: ✅ Formatter agent succeeded | fields={list(result.keys())}")
-            # Always enforce permission — formatter may have hallucinated a command
             if permission_level != "admin":
                 result["command"] = None
             return result
-
-        print(f"AGENT: ❌ Formatter agent also failed | raw={resp.text[:100]}")
+            
         return None
 
     except Exception as e:

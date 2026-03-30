@@ -388,8 +388,8 @@ async def analyze_logs(request_body: LogAnalysisRequest, request: Request):
         severity = "medium"
     remediation["severity"] = severity
 
-    # Note: MFA requirement is now determined by risk_assessment in Step 5,
-    # NOT by severity. The old line here has been removed in favor of risk-based logic.
+    # Track MFA requirement deterministically; do not rely solely on AI output
+    remediation["requires_mfa"] = (severity == "critical")
 
     print(f"SECURITY AUDIT: AI diagnosis complete | req={request_id} | "
           f"severity={severity} | confidence={remediation.get('confidence')}% | "
@@ -427,11 +427,9 @@ async def analyze_logs(request_body: LogAnalysisRequest, request: Request):
                     has_mfa = request_body.mfa_verified or session_mfa
 
                     if not has_mfa:
-                        print(f"SECURITY AUDIT: 🚨 Step-up MFA required | req={request_id} | risk={risk_score} → returning 403")
-                        raise HTTPException(
-                            status_code=403,
-                            detail={"error": "mfa_required", "message": f"Step-up authentication required for high-risk command (risk={risk_score}).", "stepup_required": True}
-                        )
+                        print(f"SECURITY AUDIT: 🚨 Step-up MFA required | req={request_id} | risk={risk_score} → returning diagnosis without command")
+                        # DO NOT raise a 403 error. Let the AI response reach the frontend!
+                        can_execute_command = False
                     else:
                         print(f"SECURITY AUDIT: ✅ MFA step-up verified | req={request_id} | risk={risk_score} → admin can execute")
                         can_execute_command = True
