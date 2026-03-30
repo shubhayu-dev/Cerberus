@@ -74,7 +74,7 @@ def _get_model():
             GEMINI_MODEL,
             generation_config=GenerationConfig(
                 temperature=0.2,
-                max_output_tokens=2048,
+                max_output_tokens=8192,
                 response_mime_type="application/json",
                 response_schema=remediation_schema, # <-- Forces perfect output
             ),

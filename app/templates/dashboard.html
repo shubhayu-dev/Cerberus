@@ -617,12 +617,12 @@ function renderResult(json) {
   const hasCmd    = isAdmin && d.command && !blocked;
   const cmdLabel  = hasCmd ? '// BASH — ADMIN AUTHORIZED' : blocked ? '// COMMAND BLOCKED — FILTER' : '// COMMANDS RESTRICTED';
   const cmdColor  = hasCmd ? 'var(--green)' : blocked ? 'var(--red)' : 'var(--user)';
-  const cmdBadge  = hasCmd ? 'FILTER APPROVED · SIGNED' : blocked ? 'ANTI-HALLUCINATION' : isAdmin ? 'MFA REQUIRED' : 'USER ROLE';
+  const cmdBadge  = hasCmd ? 'FILTER APPROVED · SIGNED' : blocked ? 'ANTI-HALLUCINATION' : d.requires_mfa ? 'MFA REQUIRED' : isAdmin ? 'MANUAL ONLY' : 'USER ROLE';
   const cmdBody   = hasCmd
     ? `<div class="cmd-body"><span class="cmd-prompt">$</span>${d.command}</div>`
     : blocked
     ? `<div class="cmd-body null-cmd">⛔ ${d.block_reason||'Failed security filter'}</div>`
-    : `<div class="cmd-body null-cmd">🔒 ${isAdmin?'Complete MFA to unlock commands':'Executable commands require admin role'}</div>`;
+    : `<div class="cmd-body null-cmd">${d.requires_mfa ? '🔒 Complete MFA to unlock commands' : 'ℹ️ No automated command generated. Review manual steps.'}</div>`;
 
   const sigHtml = json.signed_payload ? `
     <div class="sig-box">
