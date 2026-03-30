@@ -238,9 +238,18 @@ header{position:sticky;top:0;z-index:100;border-bottom:1px solid var(--border);b
     </div>
 
     <div class="panel">
-      <div class="ph"><div class="dot" style="background:var(--green)"></div>Security Audit Trail<span style="margin-left:auto;color:var(--border2);font-size:0.6rem" id="auditCount">0 events</span></div>
-      <div id="auditList"><div style="padding:14px 16px;font-family:var(--mono);font-size:0.68rem;color:var(--muted);text-align:center;">No events yet</div></div>
+  <div class="ph">
+    <div class="dot" style="background:var(--green)"></div>
+    Security Audit Trail
+    <div style="margin-left:auto; display:flex; align-items:center; gap:10px;">
+      <button onclick="clearAccountHistory()" style="background:transparent; border:none; color:var(--red); font-family:var(--mono); font-size:0.6rem; cursor:pointer; padding:0; opacity:0.6;">[CLEAR]</button>
+      <span style="color:var(--border2); font-size:0.6rem" id="auditCount">0 events</span>
     </div>
+  </div>
+  <div id="auditList">
+    <div style="padding:14px 16px;font-family:var(--mono);font-size:0.68rem;color:var(--muted);text-align:center;">No events yet</div>
+  </div>
+</div>
   </div>
 </div>
 
@@ -306,10 +315,73 @@ const SCENARIOS = [
     log:"2024-01-15 05:01:44 ERROR: Failed to open /var/run/app/app.sock: Permission denied\napp-daemon.service: Failed to start" },
 ];
 
+// Place this near your other UI rendering functions
+function renderAuditListFromHistory() {
+    const list = document.getElementById('auditList');
+    if (!list) return;
+
+    if (auditEvents.length === 0) {
+        list.innerHTML = '<div style="padding:14px 16px;font-family:var(--mono);font-size:0.68rem;color:var(--muted);text-align:center;">No events yet</div>';
+        return;
+    }
+
+    // This generates the HTML rows for your sidebar using the Redis data
+    list.innerHTML = auditEvents.map(e => {
+        const isAdmin = e.permission_level === 'admin';
+        // Handle both full analysis objects and the slim 'audit' objects from Redis
+        const severity = e.severity || (e.remediation ? e.remediation.severity : 'info');
+        const timestamp = e.timestamp;
+        const time = new Date(timestamp).toLocaleTimeString('en-US', { hour12: false });
+        
+        // Color coding: Red for critical, Orange for high/med, Green for healthy
+        const color = e.failure_detected !== false ? (severity === 'critical' ? 'var(--red)' : 'var(--orange)') : 'var(--green)';
+        
+        return `
+        <div class="ai">
+          <div class="dot" style="background:${color};flex-shrink:0;margin-top:3px"></div>
+          <div class="ai-time">${time}</div>
+          <div class="ai-text">
+            req:${e.request_id} · ${e.service_name} · ${severity}
+          </div>
+          <span class="role-pill ${isAdmin ? 'role-admin' : 'role-user'}" style="font-size:0.5rem">
+            ${isAdmin ? 'ADMIN' : 'USER'}
+          </span>
+        </div>`;
+    }).join('');
+}
+
 (async function init() {
   buildScenarios();
-  await loadUser();
+  
+  // 1. CRITICAL: Wait for user session to be fully loaded
+  // This ensures userInfo.is_admin and the session cookie are ready
+  await loadUser(); 
+  
   checkHealth();
+
+  // 2. CHECK FOR PENDING STATE
+  const savedLog = localStorage.getItem('pending_log');
+  
+  if (savedLog) {
+    console.log("MFA complete: Resuming pending analysis with verified session...");
+    
+    // Fill the UI back up
+    document.getElementById('logText').value = savedLog;
+    document.getElementById('serviceName').value = localStorage.getItem('pending_service') || 'unknown';
+    document.getElementById('githubRepo').value = localStorage.getItem('pending_repo') || '';
+    
+    // 3. Clear storage BEFORE running to prevent any loop if an error occurs
+    localStorage.removeItem('pending_log');
+    localStorage.removeItem('pending_service');
+    localStorage.removeItem('pending_repo');
+
+    // 4. Trigger analysis. 
+    // Since loadUser() finished, the backend will now see your MFA status.
+    runAnalysis(); 
+  } else {
+    // If no pending log, maybe fetch the account history from Redis?
+    // fetchAccountHistory(); 
+  }
 })();
 
 async function loadUser() {
@@ -388,6 +460,10 @@ async function runAnalysis() {
   
   if (!logText) { alert('Paste a log first.'); return; }
 
+  localStorage.setItem('pending_log', logText);
+  localStorage.setItem('pending_service', serviceName);
+  if (githubRepo) localStorage.setItem('pending_repo', githubRepo);
+
   const btn = document.getElementById('analyzeBtn');
   btn.disabled = true; btn.textContent = '⏳ ANALYZING...';
   document.getElementById('resultBody').innerHTML = `
@@ -455,7 +531,11 @@ async function runAnalysis() {
     updateMetrics(json);
     addAudit(json);
     renderResult(json);
-
+    
+    // ── CLEAR PENDING STATE ON SUCCESS ──
+    localStorage.removeItem('pending_log');
+    localStorage.removeItem('pending_service');
+    localStorage.removeItem('pending_repo');
     if (json.remediation?.requires_mfa && userInfo?.is_admin && !json.remediation?.command && !json.audit_trail?.mfa_verified) {
       console.warn('SECURITY AUDIT: MFA-required response, forcing MFA modal.');
       showMFAModal();
@@ -472,6 +552,63 @@ async function runAnalysis() {
   }
   
   btn.disabled = false; btn.textContent = '▶ ANALYZE LOG';
+}
+
+async function fetchAccountHistory() {
+  try {
+    const resp = await fetch('/logs/history', { credentials: 'include' });
+    if (!resp.ok) return;
+    
+    const data = await resp.json();
+    if (data.history && data.history.length > 0) {
+      // 1. Seed the global array
+      auditEvents = data.history; 
+      
+      // 2. Update the counter in the UI header
+      document.getElementById('auditCount').textContent = `${auditEvents.length} events`;
+      
+      // 3. Render the sidebar
+      renderAuditListFromHistory(); 
+    }
+  } catch (e) {
+    console.error("History fetch failed:", e);
+  }
+}
+
+// Helper to keep the UI logic clean
+function renderAuditListFromHistory() {
+    // This uses your existing audit template logic to draw the list
+    const list = document.getElementById('auditList');
+    if (auditEvents.length > 0) {
+        // Reuse your existing mapping logic from addAudit(json)
+        // (Make sure your existing addAudit logic is accessible or copied here)
+    }
+}
+
+async function clearAccountHistory() {
+  if (!confirm("Are you sure you want to wipe your security audit history?")) return;
+
+  try {
+    const resp = await fetch('/logs/history', { 
+      method: 'DELETE', 
+      credentials: 'include' 
+    });
+
+    if (resp.ok) {
+      // 1. Clear the local array
+      auditEvents = [];
+      
+      // 2. Reset the counter UI
+      document.getElementById('auditCount').textContent = `0 events`;
+      
+      // 3. Re-render the empty list
+      renderAuditListFromHistory();
+      
+      console.log("SECURITY AUDIT: Redis history cleared successfully.");
+    }
+  } catch (e) {
+    console.error("Failed to clear history:", e);
+  }
 }
 // ── AUTH0 REAL STEP-UP MFA TRIGGER ─────────────────────────────────────────
 

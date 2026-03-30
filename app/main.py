@@ -22,7 +22,7 @@ from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, HTMLResponse, RedirectResponse
 from starlette.middleware.sessions import SessionMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, json
 from dotenv import load_dotenv
 import httpx
 
@@ -541,6 +541,12 @@ async def analyze_logs(request_body: LogAnalysisRequest, request: Request):
           f"command={'authorized' if audit['command_authorized'] else 'denied'} | "
           f"signed={audit['command_signed']} | "
           f"github_issue={audit['github_issue_created']}\n")
+    
+    if redis:
+        history_key = f"history:{actor['sub']}"
+        # Store last 10 incidents for this specific account
+        redis.lpush(history_key, json.dumps(audit)) 
+        redis.ltrim(history_key, 0, 9)
 
     return RemediationResponse(
         timestamp=datetime.now(timezone.utc).isoformat(),
@@ -558,6 +564,39 @@ async def analyze_logs(request_body: LogAnalysisRequest, request: Request):
         audit_trail=audit,
     )
 
+@app.get("/logs/history", tags=["Agent"])
+async def get_logs_history(request: Request):
+    """Fetches the last 10 remediation incidents from Redis for the current user."""
+    import json
+    if not redis:
+        # Fallback if Redis is down during the demo
+        return {"history": []}
+        
+    actor = get_actor(request)
+    history_key = f"history:{actor['sub']}"
+    
+    # Fetch the list from Redis
+    raw_history = redis.lrange(history_key, 0, -1)
+    
+    # Parse the JSON strings back into Python dictionaries
+    history = [json.loads(item) for item in raw_history]
+    
+    return {"history": history}
+
+@app.delete("/logs/history", tags=["Agent"])
+async def delete_logs_history(request: Request):
+    """Deletes all remediation incidents from Redis for the current user."""
+    if not redis:
+        raise HTTPException(status_code=503, detail="Redis history service unavailable")
+        
+    actor = get_actor(request)
+    history_key = f"history:{actor['sub']}"
+    
+    # Delete the key from Redis
+    redis.delete(history_key)
+    
+    print(f"SECURITY AUDIT: 🗑 History cleared for user {actor['sub']}")
+    return {"ok": True, "message": "History cleared"}
 
 @app.post('/api/create-issue', tags=['GitHub'])
 async def create_github_issue(request_body: IssueRequest, actor=Depends(require_auth)):
