@@ -807,35 +807,35 @@ function renderAuditListFromHistory() {
 (async function init() {
   buildScenarios();
   
-  // // 1. CRITICAL: Wait for user session to be fully loaded
-  // // This ensures userInfo.is_admin and the session cookie are ready
-  // await loadUser(); 
+  // 1. CRITICAL: Wait for user session to be fully loaded
+  // This ensures userInfo.is_admin and the session cookie are ready
+  await loadUser(); 
   
-  // checkHealth();
+  checkHealth();
 
-  // // 2. CHECK FOR PENDING STATE
-  // const savedLog = localStorage.getItem('pending_log');
+  // 2. CHECK FOR PENDING STATE
+  const savedLog = localStorage.getItem('pending_log');
   
-  // if (savedLog) {
-  //   console.log("MFA complete: Resuming pending analysis with verified session...");
+  if (savedLog) {
+    console.log("MFA complete: Resuming pending analysis with verified session...");
     
-  //   // Fill the UI back up
-  //   document.getElementById('logText').value = savedLog;
-  //   document.getElementById('serviceName').value = localStorage.getItem('pending_service') || 'unknown';
-  //   document.getElementById('githubRepo').value = localStorage.getItem('pending_repo') || '';
+    // Fill the UI back up
+    document.getElementById('logText').value = savedLog;
+    document.getElementById('serviceName').value = localStorage.getItem('pending_service') || 'unknown';
+    document.getElementById('githubRepo').value = localStorage.getItem('pending_repo') || '';
     
-  //   // 3. Clear storage BEFORE running to prevent any loop if an error occurs
-  //   localStorage.removeItem('pending_log');
-  //   localStorage.removeItem('pending_service');
-  //   localStorage.removeItem('pending_repo');
+    // 3. Clear storage BEFORE running to prevent any loop if an error occurs
+    localStorage.removeItem('pending_log');
+    localStorage.removeItem('pending_service');
+    localStorage.removeItem('pending_repo');
 
-  //   // 4. Trigger analysis. 
-  //   // Since loadUser() finished, the backend will now see your MFA status.
-  //   runAnalysis(); 
-  // } else {
-  //   // If no pending log, maybe fetch the account history from Redis?
-  //   // fetchAccountHistory(); 
-  // }
+    // 4. Trigger analysis. 
+    // Since loadUser() finished, the backend will now see your MFA status.
+    runAnalysis(); 
+  } else {
+    // If no pending log, maybe fetch the account history from Redis?
+    // fetchAccountHistory(); 
+  }
 })();
 
 async function loadUser() {
