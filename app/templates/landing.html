@@ -113,36 +113,41 @@ h1 {
 
 .tagline strong { color: var(--text); }
 
-/* LOGIN BUTTON */
-.login-btn {
+/* LOGIN BUTTON — single element */
+.login-group {
   display: inline-flex;
   align-items: center;
   gap: 10px;
-  padding: 13px 28px;
+  padding: 13px 24px;
   background: rgba(245,197,24,0.12);
   border: 2px solid var(--accent);
   border-bottom: 4px solid rgba(180,140,0,0.5);
   box-shadow: 4px 4px 0 rgba(0,0,0,0.8);
   color: var(--accent);
   font-family: var(--pixel);
-  font-size: 0.48rem;
-  letter-spacing: 0.1em;
+  font-size: 0.44rem;
+  letter-spacing: 0.08em;
   text-decoration: none;
-  transition: none;
   margin-bottom: 3rem;
-  display: inline-flex;
+  white-space: nowrap;
+  transition: none;
 }
 
-.login-btn:hover {
+.login-group:hover {
   background: rgba(245,197,24,0.22);
   transform: translate(-2px,-2px);
   box-shadow: 6px 6px 0 rgba(0,0,0,0.8);
 }
 
-.login-btn:active {
+.login-group:active {
   transform: translate(2px,2px);
   box-shadow: 2px 2px 0 rgba(0,0,0,0.8);
   border-bottom-width: 2px;
+}
+
+.login-sep {
+  color: rgba(245,197,24,0.35);
+  font-size: 0.6rem;
 }
 
 /* DIVIDER */
